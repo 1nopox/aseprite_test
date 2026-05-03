@@ -1,70 +1,64 @@
-name: build-aseprite-steamos
+name: Build Aseprite on Arch Linux (SteamOS compatible)
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: archlinux:latest
+      image: archlinux:base-devel
+      options: --privileged
 
     steps:
-      - name: Checkout repository with submodules
+      - name: Install Arch dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm \
+            git clang cmake ninja \
+            libx11 libxcursor libxi libxrandr \
+            mesa-libgl fontconfig libwebp \
+            curl unzip
+
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Install build dependencies
-        shell: bash
+      - name: Download Skia m124 (Linux x64)
         run: |
-          pacman -Syu --noconfirm
-          pacman -S --noconfirm --needed \
-            base-devel git curl unzip cmake ninja clang gcc \
-            libx11 libxcursor libxi libxrandr mesa-libgl fontconfig libwebp
-
-      - name: Download Skia
-        shell: bash
-        run: |
-          mkdir -p .deps/skia-m124
-          skia_url=$(bash laf/misc/skia-url.sh Release | xargs)
-          skia_file=$(basename "$skia_url")
-          curl -L -o ".deps/skia-m124/$skia_file" "$skia_url"
-          unzip -o ".deps/skia-m124/$skia_file" -d ".deps/skia-m124"
-
-      - name: Configure
-        shell: bash
-        run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DLAF_BACKEND=skia \
-            -DSKIA_DIR="$PWD/.deps/skia-m124" \
-            -DSKIA_LIBRARY_DIR="$PWD/.deps/skia-m124/out/Release-x64" \
-            -DENABLE_TESTS=OFF \
-            -DENABLE_CCACHE=OFF
+          mkdir -p /deps/skia
+          curl -L -o /deps/skia.zip \
+            https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Linux-Release-x64.zip
+          unzip -q /deps/skia.zip -d /deps/skia
 
       - name: Build
-        shell: bash
         run: |
-          cmake --build build --target aseprite --parallel
+          export CC=clang
+          export CXX=clang++
+          mkdir build && cd build
+          cmake \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DCMAKE_CXX_FLAGS:STRING=-stdlib=libstdc++ \
+            -DCMAKE_EXE_LINKER_FLAGS:STRING=-stdlib=libstdc++ \
+            -DLAF_BACKEND=skia \
+            -DSKIA_DIR=/deps/skia \
+            -DSKIA_LIBRARY_DIR=/deps/skia/out/Release-x64 \
+            -DSKIA_LIBRARY=/deps/skia/out/Release-x64/libskia.a \
+            -G Ninja \
+            ..
+          ninja aseprite
 
-      - name: Package portable build
-        shell: bash
+      - name: Package
         run: |
-          mkdir -p dist/root
-          cp -a build/bin dist/root/
-          if [ -d build/data ]; then
-            cp -a build/data dist/root/
-          fi
-          tar -C dist/root -czf dist/aseprite-steamos.tar.gz .
+          mkdir -p aseprite-steamos
+          cp -r build/bin aseprite-steamos/
+          cp -r data aseprite-steamos/
+          strip aseprite-steamos/bin/aseprite
+          tar czf aseprite-steamos.tar.gz aseprite-steamos
 
-      - name: Upload artifact
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: aseprite-steamos
-          path: dist/aseprite-steamos.tar.gz
-          if-no-files-found: error
-          retention-days: 14
+          name: aseprite-steamos-arch
+          path: aseprite-steamos.tar.gz
