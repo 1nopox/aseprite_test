@@ -1,0 +1,150 @@
+name: build-aseprite-fork
+
+on:
+  workflow_dispatch:
+    inputs:
+      os:
+        description: "OS to build"
+        type: choice
+        required: true
+        default: ubuntu-latest
+        options:
+          - ubuntu-latest
+          - windows-latest
+          - macos-latest
+      build_type:
+        description: "Build type"
+        type: choice
+        required: true
+        default: RelWithDebInfo
+        options:
+          - RelWithDebInfo
+          - Debug
+      ui:
+        description: "Build GUI or CLI"
+        type: choice
+        required: true
+        default: gui
+        options:
+          - gui
+          - cli
+      scripting:
+        description: "Lua scripting"
+        type: choice
+        required: true
+        default: lua
+        options:
+          - lua
+          - noscripts
+
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ${{ inputs.os || 'ubuntu-latest' }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository with submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            g++ clang cmake ninja-build \
+            libpixman-1-dev libfreetype6-dev libharfbuzz-dev zlib1g-dev \
+            libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev \
+            libfontconfig1-dev curl unzip
+
+      - name: Install Ninja
+        uses: aseprite/get-ninja@main
+
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Download Skia
+        if: ${{ inputs.ui == 'gui' }}
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]] ; then
+            this_dir=$(cygpath "${{ github.workspace }}")
+          else
+            this_dir="${{ github.workspace }}"
+          fi
+
+          skia_url=$(source "$this_dir/laf/misc/skia-url.sh" | xargs)
+          skia_file=$(basename "$skia_url")
+
+          curl --ssl-revoke-best-effort -L -o "$skia_file" "$skia_url"
+          unzip "$skia_file" -d skia
+
+      - name: Configure project
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]] ; then
+            export enable_ccache=off
+          else
+            export enable_ccache=on
+          fi
+
+          if [[ "${{ inputs.ui }}" == "gui" ]] ; then
+            export laf_backend=skia
+          else
+            export laf_backend=none
+          fi
+
+          if [[ "${{ inputs.scripting }}" == "lua" ]] ; then
+            export enable_scripting=on
+          else
+            export enable_scripting=off
+          fi
+
+          if [[ "${{ runner.os }}" == "macOS" ]] ; then
+            export skia_arch=arm64
+          else
+            export skia_arch=x64
+          fi
+
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} \
+            -DENABLE_TESTS=ON \
+            -DENABLE_SCRIPTING=$enable_scripting \
+            -DENABLE_CCACHE=$enable_ccache \
+            -DLAF_BACKEND=$laf_backend \
+            -DSKIA_DIR=$(realpath skia) \
+            -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-$skia_arch)
+
+      - name: Build
+        shell: bash
+        run: |
+          cmake --build build --config ${{ inputs.build_type }} --parallel
+
+      - name: Package build output
+        shell: bash
+        run: |
+          mkdir -p dist
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            powershell -NoProfile -Command "Compress-Archive -Path build/* -DestinationPath dist/aseprite-build.zip -Force"
+          else
+            cd build
+            zip -r ../dist/aseprite-build.zip .
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aseprite-${{ inputs.os }}-${{ inputs.build_type }}-${{ inputs.ui }}-${{ inputs.scripting }}
+          path: dist/aseprite-build.zip
+          if-no-files-found: error
+          retention-days: 7
